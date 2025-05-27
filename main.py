@@ -167,8 +167,6 @@ def find_rect():
             if grid[row][col] == 9:
                 for row2 in range(row, GRID_ROWS + 1):
                     for col2 in range(col, GRID_COLS + 1):
-                        if grid[row2][col2] == 0:
-                            break
                         sum = psum[row2][col2] - psum[row2][col - 1] - psum[row - 1][col2] + psum[row - 1][col - 1]
                         if sum == 10:
                             ret.append([row, col, row2, col2])
@@ -180,8 +178,6 @@ def find_rect():
             if grid[row][col] == 8:
                 for row2 in range(row, GRID_ROWS + 1):
                     for col2 in range(col, GRID_COLS + 1):
-                        if grid[row2][col2] == 0:
-                            break
                         sum = psum[row2][col2] - psum[row2][col - 1] - psum[row - 1][col2] + psum[row - 1][col - 1]
                         if sum == 10:
                             ret.append([row, col, row2, col2])
@@ -194,8 +190,6 @@ def find_rect():
                 continue
             for row2 in range(row, GRID_ROWS + 1):
                 for col2 in range(col, GRID_COLS + 1):
-                    if grid[row2][col2] == 0:
-                        break
                     sum = psum[row2][col2] - psum[row2][col-1] - psum[row-1][col2] + psum[row-1][col-1]
                     if sum == 10:
                         ret.append([row, col, row2, col2])
@@ -225,7 +219,7 @@ def draw_rect(driver, rects):
         pyautogui.mouseDown()
         pyautogui.moveTo(x2, y2, duration=0.1)
         pyautogui.mouseUp()
-        time.sleep(0.2)
+        time.sleep(0.1)
         # break
 
 
