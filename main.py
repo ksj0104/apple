@@ -130,6 +130,9 @@ def start_browser(url, status_label):
     driver.get(url)
 
     image_path = "C:/Users/ksj0104/Downloads/apple.png"
+
+    if os.path.exists(image_path):
+        os.remove(image_path)
     status_label.config(text="브라우저 실행됨. S 키로 저장, ESC 키로 종료 대기 중...")
 
     # calibration()  # 마우스 좌표 캘리브레이션하기
