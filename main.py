@@ -16,9 +16,10 @@ running = False
 
 GRID_COLS = 19
 GRID_ROWS = 11
-global grid, grid_axis
-grid = [[0 for i in range(GRID_COLS)] for j in range(GRID_ROWS)]
-grid_axis = [[0 for i in range(GRID_COLS)] for j in range(GRID_ROWS)]
+
+grid = [[0 for i in range(GRID_COLS + 1)] for j in range(GRID_ROWS + 1)]
+psum = [[0 for i in range(GRID_COLS + 1)] for j in range(GRID_ROWS + 1)]
+grid_axis = [[0 for i in range(GRID_COLS + 1)] for j in range(GRID_ROWS + 1)]
 
 def start_browser(url, status_label):
     global driver, running
@@ -65,11 +66,9 @@ def start_browser(url, status_label):
         elif keyboard.is_pressed("r"):
             image_path = "C:/Users/ksj0104/Downloads/apple.png"
             temp = ocr(image_path)
-            for row in range(GRID_ROWS):
-                for col in range(GRID_COLS):
-                    grid[row][col] = temp[row][col]
-                    print(grid[row][col], end=' ')
-                print('')
+            for row in range(1, GRID_ROWS + 1):
+                for col in range(1, GRID_COLS + 1):
+                    grid[row][col] = temp[row-1][col-1]
 
             # ✅ 이미지 삭제
             if os.path.exists(image_path):
@@ -80,7 +79,38 @@ def start_browser(url, status_label):
         elif keyboard.is_pressed("b"):
             calibration() # 마우스 좌표 캘리브레이션하기
 
+        elif keyboard.is_pressed("f"):
+            refresh()
+            find_rect()
+
+
         time.sleep(0.1)
+
+def use_axis(x, y):
+    grid[x][y] = 0
+    return
+
+
+def refresh():
+    for row in range(1, GRID_ROWS + 1):
+        for col in range(1, GRID_COLS + 1):
+            psum[row][col] = psum[row - 1][col] + psum[row][col - 1] - psum[row - 1][col - 1] + grid[row][col]
+
+
+def find_rect():
+    ret = []
+
+    for row in range(1, GRID_ROWS + 1):
+        for col in range(1, GRID_COLS + 1):
+            for row2 in range(row, GRID_ROWS + 1):
+                for col2 in range(col, GRID_COLS + 1):
+                    sum = psum[row2][col2] - psum[row2][col-1] - psum[row-1][col2] + psum[row-1][col-1]
+                    if sum == 10:
+                        ret.append([row, col, row2, col2])
+                        break
+                    elif sum > 10:
+                        break
+    return ret
 
 def calibration():
     canvas = driver.find_element(By.CLASS_NAME, "AppleGame_canvas__hyqxE")
@@ -106,7 +136,7 @@ def calibration():
         for col in range(GRID_COLS):
             x = canvas_x + PADDING + col * CELL_WIDTH + CELL_WIDTH // 2
             y = canvas_y + PADDING + row * CELL_HEIGHT + CELL_HEIGHT // 2
-            grid_axis[row][col] = [x, y+offset_y]
+            grid_axis[row + 1][col + 1] = [x, y+offset_y]
             print([x, y+offset_y], end =' ')
         print('')
     return
