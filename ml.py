@@ -105,18 +105,15 @@ def evaluation():
 
     print(f"✅ 테스트 정확도: {100 * correct / total:.2f}%")
 
-def test(model, image_path):
+def test(model, device, image):
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     transform = transforms.Compose([
         transforms.Grayscale(),
         transforms.Resize((28, 28)),
         transforms.ToTensor(),
         transforms.Normalize((0.5,), (0.5,))
     ])
-
-    img = Image.open(image_path)
-    img = transform(img)
+    img = transform(image)
     img = img.unsqueeze(0).to(device)
 
     with torch.no_grad():

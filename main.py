@@ -9,6 +9,9 @@ from PIL import Image, ImageTk
 from apple import *
 import pyautogui, time
 from selenium.webdriver.common.by import By
+from ml import *
+import numpy as np
+import os
 
 # 전역 변수
 driver = None
@@ -16,10 +19,105 @@ running = False
 
 GRID_COLS = 19
 GRID_ROWS = 11
+offset_y = 146
 
 grid = [[0 for i in range(GRID_COLS + 1)] for j in range(GRID_ROWS + 1)]
-psum = [[0 for i in range(GRID_COLS + 1)] for j in range(GRID_ROWS + 1)]
-grid_axis = [[0 for i in range(GRID_COLS + 1)] for j in range(GRID_ROWS + 1)]
+psum = [[0 for i2 in range(GRID_COLS + 1)] for j2 in range(GRID_ROWS + 1)]
+grid_axis = [[0 for i3 in range(GRID_COLS + 1)] for j3 in range(GRID_ROWS + 1)]
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# 모델 불러오기 (한 번만)
+model = SimpleCNN()
+model.load_state_dict(torch.load("digit_cnn.pth", map_location=device))
+model.to(device)
+model.eval()
+
+def split_image_into_grid(image, tile_size=120):
+    width, height = image.size
+    tiles = []
+
+    for top in range(0, height, tile_size):
+        for left in range(0, width, tile_size):
+            right = min(left + tile_size, width)
+            bottom = min(top + tile_size, height)
+
+            # 120x120로 자르기 (끝부분은 남은 크기만큼 잘림)
+            tile = image.crop((left, top, right, bottom))
+            tiles.append(tile)
+
+    return tiles
+
+def ocr(image_path):
+    white_threshold=245
+    enhance_range = 200
+    # 1. 이미지 열기 & 그레이스케일 변환
+    img = Image.open(image_path).convert("L")  # 'L' = grayscale
+
+    # ✅ 이미지 1.5배 확대
+    scale = 10
+    new_size = (int(img.width * scale), int(img.height * scale))
+    img = img.resize(new_size, Image.LANCZOS)  # 고품질 리사이징
+
+    # 2. NumPy 배열로 변환
+    img_np = np.array(img)
+
+    # # 3. 흰색(밝은 값)만 유지, 나머지 0
+    # mask = img_np >= white_threshold  # True for white-ish pixels
+    # img_np[:] = 0  # 전체를 검정으로
+    # img_np[mask] = 255  # 흰색만 유지
+
+    # 3. 밝은 회색 → 흰색으로 밀어올림 (선 강조)
+    img_np[img_np >= enhance_range] = 255
+
+    # 4. 흰색이 아닌 나머지는 검정 처리
+    mask = img_np >= white_threshold
+    img_np[:] = 0
+    img_np[mask] = 255
+
+    image = Image.fromarray(img_np)
+    image = image.resize((2420, 1460), Image.LANCZOS)
+
+    # ✅ 상하좌우 65px씩 crop (패딩 제거)
+    crop_margin = 70
+    cropped_image = image.crop((
+        crop_margin,  # left
+        crop_margin,  # top
+        image.width - crop_margin,  # right
+        image.height - crop_margin  # bottom
+    ))
+
+    # 필요 시 덮어쓰기 또는 새로운 이미지로 저장
+    image = cropped_image
+    tiles = split_image_into_grid(image)
+
+    x = 1
+    y = 1
+    for i, tile in enumerate(tiles):
+        grid[x][y] = test(model, device, tile)
+        y += 1
+        if y > GRID_COLS:
+            x += 1
+            y = 1
+
+    for i in range(1, GRID_ROWS + 1):
+        for j in range(1, GRID_COLS + 1):
+            print(grid[i][j], end=" ")
+        print('')
+    os.remove(image_path)
+
+def load_image(driver):
+    js_script = """
+    const canvas = document.querySelector('.AppleGame_canvas__hyqxE');
+    if (canvas) {
+        const link = document.createElement('a');
+        link.href = canvas.toDataURL("image/png");
+        link.download = 'apple.png';
+        link.click();
+    } else {
+        alert("Canvas not found after delay!");
+    }
+    """
+    driver.execute_script(js_script)
 
 def start_browser(url, status_label):
     global driver, running
@@ -31,64 +129,27 @@ def start_browser(url, status_label):
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     driver.get(url)
 
-    # JavaScript 삽입 - S 키로 캔버스 저장
-    js_script = """
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 's' || e.key === 'S') {
-            const startBtn = document.querySelector('.AppleGame_startButton__9xL5W');
-            if (startBtn) {
-                startBtn.click();
-            }
-    
-            // ✅ 1초(1000ms) 딜레이 후 캔버스 저장 시도
-            setTimeout(() => {
-                const canvas = document.querySelector('.AppleGame_canvas__hyqxE');
-                if (canvas) {
-                    const link = document.createElement('a');
-                    link.href = canvas.toDataURL("image/png");
-                    link.download = 'apple.png';
-                    link.click();
-                } else {
-                    alert("Canvas not found after delay!");
-                }
-            }, 150); // 1000 = 1초 (필요시 더 늘리기)
-        }
-    });
-    """
-    driver.execute_script(js_script)
+    image_path = "C:/Users/ksj0104/Downloads/apple.png"
     status_label.config(text="브라우저 실행됨. S 키로 저장, ESC 키로 종료 대기 중...")
 
+    # calibration()  # 마우스 좌표 캘리브레이션하기
     # ESC 키 감지 루프
     while running:
         if keyboard.is_pressed("esc"):
             stop_browser(status_label)
             break
-        elif keyboard.is_pressed("r"):
-            image_path = "C:/Users/ksj0104/Downloads/apple.png"
-            temp = ocr(image_path)
-            for row in range(1, GRID_ROWS + 1):
-                for col in range(1, GRID_COLS + 1):
-                    grid[row][col] = temp[row-1][col-1]
 
-            # ✅ 이미지 삭제
+        elif keyboard.is_pressed("q"):
+            load_image(driver)
+        elif keyboard.is_pressed("w"):
             if os.path.exists(image_path):
-                os.remove(image_path)
-                print(f"{image_path} 삭제 완료")
+                ocr(image_path)
+                refresh()
+                draw_rect(driver, find_rect())
             else:
-                print("이미지 파일이 존재하지 않습니다.")
-        elif keyboard.is_pressed("b"):
-            calibration() # 마우스 좌표 캘리브레이션하기
-
-        elif keyboard.is_pressed("f"):
-            refresh()
-            find_rect()
-
+                load_image(driver)
 
         time.sleep(0.1)
-
-def use_axis(x, y):
-    grid[x][y] = 0
-    return
 
 
 def refresh():
@@ -100,10 +161,41 @@ def refresh():
 def find_rect():
     ret = []
 
+    # 9, 1 찾기
     for row in range(1, GRID_ROWS + 1):
         for col in range(1, GRID_COLS + 1):
+            if grid[row][col] == 9:
+                for row2 in range(row, GRID_ROWS + 1):
+                    for col2 in range(col, GRID_COLS + 1):
+                        if grid[row2][col2] == 0:
+                            break
+                        sum = psum[row2][col2] - psum[row2][col - 1] - psum[row - 1][col2] + psum[row - 1][col - 1]
+                        if sum == 10:
+                            ret.append([row, col, row2, col2])
+                            break
+                        elif sum > 10:
+                            break
+    for row in range(1, GRID_ROWS + 1):
+        for col in range(1, GRID_COLS + 1):
+            if grid[row][col] == 8:
+                for row2 in range(row, GRID_ROWS + 1):
+                    for col2 in range(col, GRID_COLS + 1):
+                        if grid[row2][col2] == 0:
+                            break
+                        sum = psum[row2][col2] - psum[row2][col - 1] - psum[row - 1][col2] + psum[row - 1][col - 1]
+                        if sum == 10:
+                            ret.append([row, col, row2, col2])
+                            break
+                        elif sum > 10:
+                            break
+    for row in range(1, GRID_ROWS + 1):
+        for col in range(1, GRID_COLS + 1):
+            if grid[row][col] == 0 or grid[row][col] == 8 or grid[row][col] == 9:
+                continue
             for row2 in range(row, GRID_ROWS + 1):
                 for col2 in range(col, GRID_COLS + 1):
+                    if grid[row2][col2] == 0:
+                        break
                     sum = psum[row2][col2] - psum[row2][col-1] - psum[row-1][col2] + psum[row-1][col-1]
                     if sum == 10:
                         ret.append([row, col, row2, col2])
@@ -111,6 +203,31 @@ def find_rect():
                     elif sum > 10:
                         break
     return ret
+
+
+def draw_rect(driver, rects):
+    driver.execute_script("document.querySelectorAll('.overlay-box').forEach(el => el.remove());")
+    for row1, col1, row2, col2 in rects:
+
+        def get_center_by_grid(row, col):
+            return 28 + col * 48 - 24, 28 + row * 48 - 24
+
+        # 좌상단과 우하단 중점 좌표
+        x1, y1 = get_center_by_grid(row1, col1)
+        x2, y2 = get_center_by_grid(row2, col2)
+
+        # 드래그를 위한 패딩 조정
+        x1 += 787
+        y1 += 324
+        x2 += 797
+        y2 += 334
+        pyautogui.moveTo(x1, y1)
+        pyautogui.mouseDown()
+        pyautogui.moveTo(x2, y2, duration=0.1)
+        pyautogui.mouseUp()
+        time.sleep(0.2)
+        # break
+
 
 def calibration():
     canvas = driver.find_element(By.CLASS_NAME, "AppleGame_canvas__hyqxE")
@@ -128,10 +245,6 @@ def calibration():
 
     canvas_x = location['x']
     canvas_y = location['y']
-    canvas_width = size['width']
-    canvas_height = size['height']
-    offset_y = 146
-
     for row in range(GRID_ROWS):
         for col in range(GRID_COLS):
             x = canvas_x + PADDING + col * CELL_WIDTH + CELL_WIDTH // 2
@@ -160,20 +273,6 @@ def launch(url_entry, status_label):
     thread.start()
 
 
-def show_image(path):
-    # 이미지 열기
-    img = Image.open(path)
-    img = img.resize((300, 300))  # 적절한 크기로 조정
-
-    # Tkinter에서 사용할 이미지로 변환
-    tk_img = ImageTk.PhotoImage(img)
-
-    # 이미지 라벨에 표시
-    image_label.config(image=tk_img)
-    image_label.image = tk_img  # 🔥 참조 유지 필수!
-
-
-
 if __name__ == "__main__":
     root = tk.Tk()
     root.title("Canvas Image Saver")
@@ -189,9 +288,5 @@ if __name__ == "__main__":
 
     tk.Button(root, text="브라우저 열기", command=lambda: launch(url_entry, status_label), bg="#4CAF50", fg="white").pack(
         pady=10)
-
-    # 이미지 표시용 라벨
-    image_label = tk.Label(root)
-    image_label.pack()
 
     root.mainloop()
