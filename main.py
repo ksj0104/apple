@@ -171,10 +171,14 @@ def ocr(img):
     for (r1, c1), (r2, c2) in solver:
         start = grid_axis[r1][c1]
         end = grid_axis[r2][c2]
+        x1 = start[0] + 753 - 15
+        y1 = start[1] + 335 - 15
+        x2 = end[0] + 753 + 15
+        y2 = end[1] + 335 + 15
 
-        pyautogui.moveTo(start[0] - 15, start[1] - 15, duration=0.1)
+        pyautogui.moveTo(x1, y1, duration=0.1)
         pyautogui.mouseDown()
-        pyautogui.moveTo(end[0] + 15, end[1] + 15, duration=0.2)
+        pyautogui.moveTo(x2, y2, duration=0.2)
         pyautogui.mouseUp()
         time.sleep(0.1)  # 드래그 간 간격
 
