@@ -1,6 +1,7 @@
 import tkinter as tk
 from threading import Thread
 import keyboard
+import cv2
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
@@ -10,20 +11,23 @@ from apple import *
 import pyautogui, time
 from selenium.webdriver.common.by import By
 from ml import *
+from mylogic import *
 import numpy as np
 import os
+import base64
+import io
 
 # 전역 변수
 driver = None
 running = False
 
-GRID_COLS = 19
-GRID_ROWS = 11
+GRID_COLS = 0
+GRID_ROWS = 0
 offset_y = 146
 
-grid = [[0 for i in range(GRID_COLS + 1)] for j in range(GRID_ROWS + 1)]
-psum = [[0 for i2 in range(GRID_COLS + 1)] for j2 in range(GRID_ROWS + 1)]
-grid_axis = [[0 for i3 in range(GRID_COLS + 1)] for j3 in range(GRID_ROWS + 1)]
+grid = []
+psum = []
+grid_axis = []
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # 모델 불러오기 (한 번만)
@@ -32,224 +36,185 @@ model.load_state_dict(torch.load("digit_cnn.pth", map_location=device))
 model.to(device)
 model.eval()
 
-def split_image_into_grid(image, tile_size=120):
-    width, height = image.size
+target_image = "C:/Users/ksj0104/Downloads/apple_unit.png"
+template = cv2.imread(target_image, cv2.IMREAD_COLOR)
+w, h = template.shape[1], template.shape[0]
+
+def split_image_into_grid(image, center_axis):
     tiles = []
-
-    for top in range(0, height, tile_size):
-        for left in range(0, width, tile_size):
-            right = min(left + tile_size, width)
-            bottom = min(top + tile_size, height)
-
-            # 120x120로 자르기 (끝부분은 남은 크기만큼 잘림)
-            tile = image.crop((left, top, right, bottom))
-            tiles.append(tile)
-
+    for x, y in center_axis:
+        left = x - w//2
+        top = y - h//2
+        right = x + w//2
+        bottom = y + h//2
+        tile = image.crop((left, top, right, bottom))
+        tiles.append(tile)
     return tiles
 
-def ocr(image_path):
-    white_threshold=245
-    enhance_range = 200
-    # 1. 이미지 열기 & 그레이스케일 변환
-    img = Image.open(image_path).convert("L")  # 'L' = grayscale
 
-    # ✅ 이미지 1.5배 확대
-    scale = 10
-    new_size = (int(img.width * scale), int(img.height * scale))
-    img = img.resize(new_size, Image.LANCZOS)  # 고품질 리사이징
-
-    # 2. NumPy 배열로 변환
-    img_np = np.array(img)
-
-    # # 3. 흰색(밝은 값)만 유지, 나머지 0
-    # mask = img_np >= white_threshold  # True for white-ish pixels
-    # img_np[:] = 0  # 전체를 검정으로
-    # img_np[mask] = 255  # 흰색만 유지
-
-    # 3. 밝은 회색 → 흰색으로 밀어올림 (선 강조)
-    img_np[img_np >= enhance_range] = 255
-
-    # 4. 흰색이 아닌 나머지는 검정 처리
-    mask = img_np >= white_threshold
-    img_np[:] = 0
-    img_np[mask] = 255
-
-    image = Image.fromarray(img_np)
-    image = image.resize((2420, 1460), Image.LANCZOS)
-
-    # ✅ 상하좌우 65px씩 crop (패딩 제거)
-    crop_margin = 70
-    cropped_image = image.crop((
-        crop_margin,  # left
-        crop_margin,  # top
-        image.width - crop_margin,  # right
-        image.height - crop_margin  # bottom
-    ))
-
-    # 필요 시 덮어쓰기 또는 새로운 이미지로 저장
-    image = cropped_image
-    tiles = split_image_into_grid(image)
-
-    x = 1
-    y = 1
-    for i, tile in enumerate(tiles):
-        grid[x][y] = test(model, device, tile)
-        y += 1
-        if y > GRID_COLS:
-            x += 1
-            y = 1
-
-    for i in range(1, GRID_ROWS + 1):
-        for j in range(1, GRID_COLS + 1):
-            print(grid[i][j], end=" ")
-        print('')
-    os.remove(image_path)
-
-def load_image(driver):
+def load_image():
+    global driver
     js_script = """
     const canvas = document.querySelector('.AppleGame_canvas__hyqxE');
     if (canvas) {
-        const link = document.createElement('a');
-        link.href = canvas.toDataURL("image/png");
-        link.download = 'apple.png';
-        link.click();
+        return canvas.toDataURL("image/png").split(',')[1];  // base64만 추출
     } else {
-        alert("Canvas not found after delay!");
+        return null;
     }
     """
-    driver.execute_script(js_script)
+    base64_data = driver.execute_script(js_script)
+
+    if base64_data is None:
+        raise ValueError("Canvas not found.")
+
+    # 2️⃣ base64 → bytes
+    img_bytes = base64.b64decode(base64_data)
+
+    # 3️⃣ bytes → NumPy 배열 → OpenCV 이미지
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    opencv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)  # BGR 포맷
+    return opencv_img
+
+def ocr(img):
+    global GRID_COLS, GRID_ROWS, offset_y, device, w ,h, template, grid, grid_axis
+    # 템플릿 매칭
+
+    result = cv2.matchTemplate(img, template, cv2.TM_CCOEFF_NORMED)
+
+    # ✅ threshold 이상인 위치를 모두 가져오기
+    threshold = 0.92  # 적절한 값 조절
+
+    loc = np.where(result >= threshold)
+
+    detected = []
+    for pt in zip(*loc[::-1]):
+        if all(np.linalg.norm(np.array(pt) - np.array(d)) > 10 for d in detected):
+            detected.append(pt)
+
+    center_axis = []
+    for i, (x, y) in enumerate(detected):
+        cx = x + x + w
+        cy = y + y + h
+        center_axis.append([cx // 2, cy // 2])
+
+    grouped = []
+    current_group = [center_axis[0]]
+
+    for i in range(1, len(center_axis)):
+        if abs(center_axis[i][1] - current_group[-1][1]) <= 5:
+            current_group.append(center_axis[i])
+        else:
+            grouped.append(current_group)
+            current_group = [center_axis[i]]
+
+    # 마지막 그룹 추가
+    if current_group:
+        grouped.append(current_group)
+
+    # 평균 y 값으로 통일
+    adjusted_center_axis = []
+    for group in grouped:
+        avg_y = int(np.mean([pt[1] for pt in group]))
+        for pt in group:
+            adjusted_center_axis.append([pt[0], avg_y])
+
+    total_apple_count = len(adjusted_center_axis)
+    GRID_COLS = len(current_group)
+    GRID_ROWS = total_apple_count // GRID_COLS
+
+    grid = [[0 for i in range(GRID_COLS)] for j in range(GRID_ROWS)]
+    grid_axis = [[0 for i in range(GRID_COLS)] for j in range(GRID_ROWS)]
+
+    detect_apple_debug(adjusted_center_axis)
+    pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    tiles = split_image_into_grid(pil_img, adjusted_center_axis)
+
+    white_threshold=245
+    enhance_range = 200
+
+    for i, tile in enumerate(tiles):
+
+        img_convert = tile.convert('L')
+        scale = 10
+        new_size = (int(img_convert.width * scale), int(img_convert.height * scale))
+        img_resized  = img_convert.resize(new_size, Image.LANCZOS)  # 고품질 리사이징
+
+        # 2. NumPy 배열로 변환
+        img_np = np.array(img_resized)
+
+        # 3. 밝은 회색 → 흰색으로 밀어올림 (선 강조)
+        img_np[img_np >= enhance_range] = 255
+
+        # 4. 흰색이 아닌 나머지는 검정 처리
+        mask = img_np >= white_threshold
+        img_np[:] = 0
+        img_np[mask] = 255
+
+        image = Image.fromarray(img_np)
+
+        filename = f"cropped/tile_{i + 1:03d}.png"  # tile_001.png, tile_002.png, ...
+        image.save(filename)
+        grid[i // GRID_COLS][i % GRID_COLS] = test(model, device, image)
+        print( i // GRID_COLS, i % GRID_COLS, " = " , grid[i // GRID_COLS][i % GRID_COLS])
+
+    for i in range(GRID_ROWS):
+        for j in range(GRID_COLS):
+            print(grid[i][j], end=" ")
+        print('')
+
+    for i in range(GRID_ROWS):
+        for j in range(GRID_COLS):
+            print(grid_axis[i][j], end=" ")
+        print('')
+
+    solver = solve(grid, GRID_ROWS, GRID_COLS)
+    for (r1, c1), (r2, c2) in solver:
+        start = grid_axis[r1][c1]
+        end = grid_axis[r2][c2]
+
+        pyautogui.moveTo(start[0] - 15, start[1] - 15, duration=0.1)
+        pyautogui.mouseDown()
+        pyautogui.moveTo(end[0] + 15, end[1] + 15, duration=0.2)
+        pyautogui.mouseUp()
+        time.sleep(0.1)  # 드래그 간 간격
+
 
 def start_browser(url, status_label):
     global driver, running
     running = True
-
     # Chrome 열기
     options = webdriver.ChromeOptions()
     options.add_argument("--start-maximized")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     driver.get(url)
-
-    image_path = "C:/Users/ksj0104/Downloads/apple.png"
-
-    if os.path.exists(image_path):
-        os.remove(image_path)
     status_label.config(text="브라우저 실행됨. S 키로 저장, ESC 키로 종료 대기 중...")
 
-    # calibration()  # 마우스 좌표 캘리브레이션하기
-    # ESC 키 감지 루프
-    while running:
-        if keyboard.is_pressed("esc"):
-            stop_browser(status_label)
-            break
-
-        elif keyboard.is_pressed("q"):
-            load_image(driver)
-        elif keyboard.is_pressed("w"):
-            if os.path.exists(image_path):
-                ocr(image_path)
-                refresh()
-                draw_rect(driver, find_rect())
-            else:
-                load_image(driver)
-
-        time.sleep(0.1)
-
-
-def refresh():
-    for row in range(1, GRID_ROWS + 1):
-        for col in range(1, GRID_COLS + 1):
-            psum[row][col] = psum[row - 1][col] + psum[row][col - 1] - psum[row - 1][col - 1] + grid[row][col]
-
-
-def find_rect():
-    ret = []
-
-    # 9, 1 찾기
-    for row in range(1, GRID_ROWS + 1):
-        for col in range(1, GRID_COLS + 1):
-            if grid[row][col] == 9:
-                for row2 in range(row, GRID_ROWS + 1):
-                    for col2 in range(col, GRID_COLS + 1):
-                        sum = psum[row2][col2] - psum[row2][col - 1] - psum[row - 1][col2] + psum[row - 1][col - 1]
-                        if sum == 10:
-                            ret.append([row, col, row2, col2])
-                            break
-                        elif sum > 10:
-                            break
-    for row in range(1, GRID_ROWS + 1):
-        for col in range(1, GRID_COLS + 1):
-            if grid[row][col] == 8:
-                for row2 in range(row, GRID_ROWS + 1):
-                    for col2 in range(col, GRID_COLS + 1):
-                        sum = psum[row2][col2] - psum[row2][col - 1] - psum[row - 1][col2] + psum[row - 1][col - 1]
-                        if sum == 10:
-                            ret.append([row, col, row2, col2])
-                            break
-                        elif sum > 10:
-                            break
-    for row in range(1, GRID_ROWS + 1):
-        for col in range(1, GRID_COLS + 1):
-            if grid[row][col] == 0 or grid[row][col] == 8 or grid[row][col] == 9:
-                continue
-            for row2 in range(row, GRID_ROWS + 1):
-                for col2 in range(col, GRID_COLS + 1):
-                    sum = psum[row2][col2] - psum[row2][col-1] - psum[row-1][col2] + psum[row-1][col-1]
-                    if sum == 10:
-                        ret.append([row, col, row2, col2])
-                        break
-                    elif sum > 10:
-                        break
-    return ret
-
-
-def draw_rect(driver, rects):
+def detect_apple_debug(center_axis):
+    global w, h, driver
     driver.execute_script("document.querySelectorAll('.overlay-box').forEach(el => el.remove());")
-    for row1, col1, row2, col2 in rects:
+    idx = 0
+    for x, y in center_axis:
+        top_left = (x - w // 2, y - h // 2)
+        grid_axis[idx // GRID_COLS][idx % GRID_COLS] = [x, y]
+        idx = idx + 1
+        # JS 삽입: HTML 요소로 박스 덧씌우기
+        js_script = f"""
+               const canvas = document.querySelector('.AppleGame_canvas__hyqxE');
+               if (!canvas) return;
 
-        def get_center_by_grid(row, col):
-            return 28 + col * 48 - 24, 28 + row * 48 - 24
-
-        # 좌상단과 우하단 중점 좌표
-        x1, y1 = get_center_by_grid(row1, col1)
-        x2, y2 = get_center_by_grid(row2, col2)
-
-        # 드래그를 위한 패딩 조정
-        x1 += 787
-        y1 += 324
-        x2 += 797
-        y2 += 334
-        pyautogui.moveTo(x1, y1)
-        pyautogui.mouseDown()
-        pyautogui.moveTo(x2, y2, duration=0.1)
-        pyautogui.mouseUp()
-        time.sleep(0.1)
-        # break
-
-
-def calibration():
-    canvas = driver.find_element(By.CLASS_NAME, "AppleGame_canvas__hyqxE")
-
-    PADDING = 28  # 좌우 상하 패딩
-    CANVAS_WIDTH = 968
-    CANVAS_HEIGHT = 584
-
-    CELL_WIDTH = (CANVAS_WIDTH - 2 * PADDING) // GRID_COLS
-    CELL_HEIGHT = (CANVAS_HEIGHT - 2 * PADDING) // GRID_ROWS
-
-    # ✅ 브라우저 뷰포트 기준 좌표와 크기 가져오기
-    location = canvas.location
-    size = canvas.size
-
-    canvas_x = location['x']
-    canvas_y = location['y']
-    for row in range(GRID_ROWS):
-        for col in range(GRID_COLS):
-            x = canvas_x + PADDING + col * CELL_WIDTH + CELL_WIDTH // 2
-            y = canvas_y + PADDING + row * CELL_HEIGHT + CELL_HEIGHT // 2
-            grid_axis[row + 1][col + 1] = [x, y+offset_y]
-            print([x, y+offset_y], end =' ')
-        print('')
-    return
+               const rect = document.createElement('div');
+               rect.className = 'debug-rect';
+               rect.style.position = 'absolute';
+               rect.style.border = '2px solid red';
+               rect.style.left = (canvas.offsetLeft + {top_left[0]}) + 'px';
+               rect.style.top = (canvas.offsetTop + {top_left[1]}) + 'px';
+               rect.style.width = '{w}px';
+               rect.style.height = '{h}px';
+               rect.style.pointerEvents = 'none';
+               rect.style.zIndex = '9999';
+               canvas.parentNode.appendChild(rect);
+           """
+        driver.execute_script(js_script)
 
 def stop_browser(status_label):
     global driver, running
@@ -269,6 +234,15 @@ def launch(url_entry, status_label):
     thread.daemon = True
     thread.start()
 
+def on_analyze_click():
+    global driver
+    if driver:
+        image = load_image()
+        ocr(image)
+
+def on_exit_click(status_label):
+    stop_browser(status_label)
+    root.quit()  # Tkinter 앱 종료
 
 if __name__ == "__main__":
     root = tk.Tk()
@@ -283,7 +257,8 @@ if __name__ == "__main__":
     status_label = tk.Label(root, text="대기 중...", fg="blue")
     status_label.pack(pady=10)
 
-    tk.Button(root, text="브라우저 열기", command=lambda: launch(url_entry, status_label), bg="#4CAF50", fg="white").pack(
-        pady=10)
+    tk.Button(root, text="링크 열기", command=lambda: launch(url_entry, status_label), bg="#4CAF50", fg="white").pack(pady=10)
+    tk.Button(root, text="분석(Q)", command=on_analyze_click, bg="blue", fg="white").pack(pady=5)
+    tk.Button(root, text="종료(ESC)", command=lambda: on_exit_click(status_label), bg="red", fg="white").pack(pady=5)
 
     root.mainloop()
